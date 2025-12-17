@@ -43,7 +43,7 @@ function isOfficeLike(fileMeta) {
 /**
  * 统一的 DocumentPreview 决策入口
  * @param {Object} fileMeta - 文件元信息（type/typeName/mimetype/filename/size 等）
- * @param {Object} linkJson - Link JSON 视角下的链接信息（rawUrl/linkType/use_proxy 等）
+ * @param {Object} linkJson - Link JSON 视角下的链接信息（previewUrl/linkType/use_proxy 等）
  * @returns {Promise<{providers?: Record<string,string>}>}
  */
 export async function resolveDocumentPreview(fileMeta, linkJson) {
@@ -55,11 +55,16 @@ export async function resolveDocumentPreview(fileMeta, linkJson) {
   }
 
   const link = linkJson || {};
-  const rawUrl = link.rawUrl || null;
+  const previewUrl = link.previewUrl || null;
 
   // 基于扩展名与 preview_document_apps 配置选择 DocumentApp 模板
   const filename = fileMeta.filename || "";
   const extension = getFileExtension(filename);
+  const normalizedExt = (extension || "").toLowerCase();
+
+  // 仅对 Office OpenXML（docx/xlsx/pptx）启用
+  // - 不能对旧格式 doc/xls/ppt 注入 native：纯前端渲染不支持这些格式
+  const shouldInjectNativeOfficeProvider = ["docx", "xlsx", "pptx"].includes(normalizedExt);
 
   const appsConfig = previewSettingsCache.getDocumentAppsConfig();
   if (!appsConfig || !extension) {
@@ -72,6 +77,13 @@ export async function resolveDocumentPreview(fileMeta, linkJson) {
         configKeys: appsConfig ? Object.keys(appsConfig) : [],
       }),
     );
+    if (shouldInjectNativeOfficeProvider) {
+      return {
+        providers: {
+          native: "native",
+        },
+      };
+    }
     return baseResult;
   }
 
@@ -85,11 +97,18 @@ export async function resolveDocumentPreview(fileMeta, linkJson) {
         configKeys: Object.keys(appsConfig || {}),
       }),
     );
+    if (shouldInjectNativeOfficeProvider) {
+      return {
+        providers: {
+          native: "native",
+        },
+      };
+    }
     return baseResult;
   }
 
   const providers = buildProvidersFromTemplate(matchedEntry.providers, {
-    url: rawUrl,
+    url: previewUrl,
     name: filename,
   });
 
@@ -104,12 +123,26 @@ export async function resolveDocumentPreview(fileMeta, linkJson) {
 
   const providerKeys = Object.keys(providers);
   if (!providerKeys.length) {
+    if (shouldInjectNativeOfficeProvider) {
+      return {
+        providers: {
+          native: "native",
+        },
+      };
+    }
     return baseResult;
   }
 
-  return {
-    providers,
-  };
+  if (shouldInjectNativeOfficeProvider) {
+    return {
+      providers: {
+        native: "native",
+        ...providers,
+      },
+    };
+  }
+
+  return { providers };
 }
 
 /**

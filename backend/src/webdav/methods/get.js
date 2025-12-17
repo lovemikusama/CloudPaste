@@ -1,6 +1,8 @@
 /**
  * 处理WebDAV GET请求
  * 用于获取文件内容
+ *
+ * Range/条件请求由 StorageStreaming 统一处理
  */
 import { MountManager } from "../../storage/managers/MountManager.js";
 import { getEncryptionSecret } from "../../utils/environmentUtils.js";
@@ -8,6 +10,8 @@ import { FileSystem } from "../../storage/fs/FileSystem.js";
 import { createWebDAVErrorResponse, withWebDAVErrorHandling } from "../utils/errorUtils.js";
 import { addWebDAVHeaders, getStandardWebDAVHeaders } from "../utils/headerUtils.js";
 import { getEffectiveMimeType } from "../../utils/fileUtils.js";
+import { LinkService } from "../../storage/link/LinkService.js";
+import { StorageStreaming, STREAMING_CHANNELS } from "../../storage/streaming/index.js";
 
 // Windows MiniRedir 302自动降级：
 // - 对同一路径，第一次请求按挂载策略走 302
@@ -16,7 +20,7 @@ const miniRedirTried302 = new Set();
 
 /**
  * 从驱动返回结果中提取 URL
- * 当前 WebDAV 场景下，generateDownloadUrl / generateWebDavProxyUrl 约定返回 string 或 { url, presignedUrl? }
+ * 当前 WebDAV 场景下，generateDownloadUrl 约定返回 string 或 { url, presignedUrl? }
  * @param {*} result - 驱动返回的结果
  * @returns {string|null} 提取的 URL 或 null
  */
@@ -30,38 +34,43 @@ function extractUrlFromResult(result) {
 }
 
 /**
- * 通过本地代理下载文件（native_proxy）
- * @param {FileSystem} fileSystem - 文件系统实例
+ * 通过 StorageStreaming 层下载文件（native_proxy）
+ *
+ *
+ * @param {MountManager} mountManager - 挂载管理器
  * @param {string} path - 文件路径
- * @param {string} fileName - 文件名
  * @param {Object} c - Hono 上下文
  * @param {string} userId - 用户ID
  * @param {string} userType - 用户类型
- * @param {string} contentType - 内容类型
- * @param {string} lastModifiedStr - 最后修改时间字符串
- * @param {string} etag - ETag
  * @returns {Promise<Response>} WebDAV 响应
  */
-async function downloadViaProxy(fileSystem, path, fileName, c, userId, userType, contentType, lastModifiedStr, etag) {
-  console.log(`WebDAV GET - 使用本地代理模式: ${path}`);
-  const fileResponse = await fileSystem.downloadFile(path, fileName, c.req.raw, userId, userType);
+async function downloadViaStreaming(mountManager, path, c, userId, userType) {
+  console.log(`WebDAV GET - 使用 StorageStreaming 本地代理模式: ${path}`);
 
-  const updatedHeaders = new Headers(fileResponse.headers);
-  updatedHeaders.set("Content-Type", contentType);
-  updatedHeaders.set("Last-Modified", lastModifiedStr);
-  if (etag) {
-    updatedHeaders.set("ETag", etag);
-  }
-  updatedHeaders.set("Accept-Ranges", "bytes");
-  updatedHeaders.set("Cache-Control", "max-age=3600");
+  const encryptionSecret = getEncryptionSecret(c);
+  const streaming = new StorageStreaming({
+    mountManager,
+    storageFactory: null, // FS 路径模式不需要 storageFactory
+    encryptionSecret,
+  });
 
-  const response = new Response(fileResponse.body, {
-    status: fileResponse.status,
-    headers: updatedHeaders,
+  // 获取 Range 头
+  const rangeHeader = c.req.header("Range") || null;
+
+  // 通过 StorageStreaming 创建响应
+  const response = await streaming.createResponse({
+    path,
+    channel: STREAMING_CHANNELS.WEBDAV,
+    rangeHeader,
+    request: c.req.raw,
+    userIdOrInfo: userId,
+    userType,
+    db: c.env.DB,
   });
 
   return addWebDAVHeaders(response);
 }
+
 
 /**
  * 处理GET请求
@@ -72,8 +81,8 @@ async function downloadViaProxy(fileSystem, path, fileName, c, userId, userType,
  * @param {D1Database} db - D1数据库实例
  */
 export async function handleGet(c, path, userId, userType, db) {
-  const isHead = c.req.method === "HEAD";
-  return withWebDAVErrorHandling("GET", async () => {
+    const isHead = c.req.method === "HEAD";
+    return withWebDAVErrorHandling("GET", async () => {
     const userAgent = c.req.header("User-Agent") || "";
     const isWindowsMiniRedirector =
       userAgent.includes("Microsoft-WebDAV") || userAgent.includes("WebDAV-MiniRedir");
@@ -186,21 +195,6 @@ export async function handleGet(c, path, userId, userType, db) {
       }
     }
 
-    // 如果是HEAD请求，返回头信息
-    if (isHead) {
-      return new Response(null, {
-        status: 200,
-        headers: {
-          "Content-Length": String(contentLength),
-          "Content-Type": contentType,
-          "Last-Modified": lastModifiedStr,
-          ETag: etag,
-          "Accept-Ranges": "bytes",
-          "Cache-Control": "max-age=3600",
-        },
-      });
-    }
-
     // 根据挂载点的 webdav_policy 配置决定处理方式
     const { driver, mount, subPath } = await mountManager.getDriverByPath(path, userId, userType);
 
@@ -224,6 +218,7 @@ export async function handleGet(c, path, userId, userType, db) {
               userId,
               userType,
               forceDownload: false,
+              channel: "webdav",
             });
 
             const url = extractUrlFromResult(result);
@@ -251,45 +246,69 @@ export async function handleGet(c, path, userId, userType, db) {
         }
 
         console.log(`WebDAV GET - 驱动不支持直链生成或未返回 URL，降级到本地代理`);
-        return downloadViaProxy(fileSystem, path, fileName, c, userId, userType, contentType, lastModifiedStr, etag);
+        return downloadViaStreaming(mountManager, path, c, userId, userType);
       }
 
       case "use_proxy_url": {
-        // 策略 2：自定义域名 / 代理 URL 重定向（custom_host_proxy），由驱动生成 URL
-        if (typeof driver.generateWebDavProxyUrl === "function") {
-          try {
-            const result = await driver.generateWebDavProxyUrl(path, {
-              mount,
-              subPath,
-              db,
-              request: c.req.raw,
+        // 策略 2：基于 storage_config.url_proxy 的代理 URL 重定向
+        // 新协议：优先复用 FS 链路的 url_proxy/Worker 入口生成逻辑，保持与 /api/fs/download 一致
+        try {
+          const repositoryFactory = c.get("repos");
+          const encryptionSecret = getEncryptionSecret(c);
+          const linkService = new LinkService(db, encryptionSecret, repositoryFactory);
+
+          // WebDAV 挂载基于 FS 视图路径，复用 FS External 链路
+          const storageLink = await linkService.getFsExternalLink(path, userId, userType, {
+            forceDownload: false,
+            request: c.req.raw,
+          });
+
+          const url = storageLink?.url || null;
+          if (url) {
+            console.log(`WebDAV GET - URL 代理 use_proxy_url 通过 FS 链路生成入口: ${url}`);
+            return new Response(null, {
+              status: 302,
+              headers: getStandardWebDAVHeaders({
+                customHeaders: {
+                  Location: url,
+                  "Cache-Control": "no-cache",
+                },
+              }),
             });
-            const url = extractUrlFromResult(result);
-            if (url) {
-              console.log(`WebDAV GET - URL代理custom_host_proxy URL: ${url}`);
-              return new Response(null, {
-                status: 302,
-                headers: getStandardWebDAVHeaders({
-                  customHeaders: {
-                    Location: url,
-                    "Cache-Control": "no-cache",
-                  },
-                }),
-              });
-            }
-          } catch (error) {
-            console.warn(`WebDAV GET - 生成 use_proxy_url 代理链接失败，降级到本地代理:`, error?.message || error);
           }
+        } catch (error) {
+          console.warn(
+            `WebDAV GET - 通过 FS 链路生成 url_proxy 入口失败，将降级到本地代理:`,
+            error?.message || error,
+          );
         }
 
-        console.warn(`WebDAV GET - use_proxy_url 策略但未配置 custom_host 或驱动不支持，降级到本地代理`);
-        return downloadViaProxy(fileSystem, path, fileName, c, userId, userType, contentType, lastModifiedStr, etag);
+        console.warn(`WebDAV GET - use_proxy_url 策略下未生成 url_proxy 入口，降级到本地代理`);
+        return downloadViaStreaming(mountManager, path, c, userId, userType);
       }
 
       case "native_proxy":
       default: {
         // 策略 3：本地服务器代理（默认兜底）
-        return downloadViaProxy(fileSystem, path, fileName, c, userId, userType, contentType, lastModifiedStr, etag);
+        // StorageStreaming 层统一处理
+        if (isHead) {
+          // HEAD 请求下只返回头信息，不传输主体内容
+          const headHeaders = {
+            "Content-Length": String(contentLength),
+            "Content-Type": contentType,
+            "Last-Modified": lastModifiedStr,
+            ETag: etag,
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "max-age=3600",
+          };
+          const response = new Response(null, {
+            status: 200,
+            headers: headHeaders,
+          });
+          return addWebDAVHeaders(response);
+        }
+
+        return downloadViaStreaming(mountManager, path, c, userId, userType);
       }
     }
   });

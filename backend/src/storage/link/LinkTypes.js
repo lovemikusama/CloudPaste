@@ -1,11 +1,11 @@
 // 通用 StorageLink 类型定义与辅助工具
-// kind 仅区分 direct/proxy；presigned/custom_host 通过附加标记表达
+// kind 仅区分 direct/proxy；custom_host / 直链（如预签名）通过附加标记表达
 
 /**
  * @typedef {Object} StorageLink
  * @property {string} url              // 直链或可代理的底层 URL
  * @property {"direct"|"proxy"} kind   // 路由决策依据
- * @property {Object<string,string>=} headers
+ * @property {Record<string,string[]>|undefined} headers // 可选上游 Header 映射（用于 /api/proxy/link → Worker）
  */
 
 /**

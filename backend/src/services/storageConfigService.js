@@ -1,8 +1,10 @@
 // 统一的存储配置服务（单表 + JSON）
 import { ensureRepositoryFactory } from "../utils/repositories.js";
 import { StorageFactory } from "../storage/factory/StorageFactory.js";
+import { MountManager } from "../storage/managers/MountManager.js";
 import { ApiStatus } from "../constants/index.js";
 import { AppError, ValidationError, NotFoundError, DriverError } from "../http/errors.js";
+import { CAPABILITIES } from "../storage/interfaces/capabilities/index.js";
 
 /**
  * 计算存储配置在 WebDAV 渠道下支持的策略列表
@@ -13,38 +15,22 @@ import { AppError, ValidationError, NotFoundError, DriverError } from "../http/e
 function computeWebDavSupportedPolicies(cfg) {
   const policies = [];
   const type = cfg?.storage_type;
-  const hasCustomHost = !!cfg?.custom_host;
+  const hasUrlProxy = !!cfg?.url_proxy;
 
-  switch (type) {
-    case "S3": {
-      // S3 驱动实现了 generateDownloadUrl，支持存储直链重定向
-      policies.push("302_redirect");
-      // 配置了 custom_host 时支持 use_proxy_url（下游自定义 HOST/CDN）
-      if (hasCustomHost) {
-        policies.push("use_proxy_url");
-      }
-      // 永远支持 native_proxy（由 WebDAV 层本地代理到底层 S3）
-      policies.push("native_proxy");
-      break;
-    }
-    case "WEBDAV": {
-      // WebDAV 驱动当前不实现 generateDownloadUrl，因此不提供 302_redirect
-      // 仅在配置了 custom_host 时支持 use_proxy_url
-      if (hasCustomHost) {
-        policies.push("use_proxy_url");
-      }
-      // 永远支持 native_proxy（由 WebDAV 层本地代理到底层 WebDAV 服务器）
-      policies.push("native_proxy");
-      break;
-    }
-    default: {
-      // 其他类型：兜底只声明 native_proxy
-      policies.push("native_proxy");
-      break;
-    }
+  // 所有存储类型统一支持本地代理（native_proxy）
+  policies.push("native_proxy");
+
+  // 只要配置了 url_proxy，就支持 URL 代理（use_proxy_url），与 storage_type 无关
+  if (hasUrlProxy) {
+    policies.push("use_proxy_url");
   }
 
-  //去重
+  // 仅具备 DirectLink 能力的类型暴露 302_redirect（例如 S3、ONEDRIVE 等）
+  if (type && StorageFactory.supportsCapability(type, CAPABILITIES.DIRECT_LINK)) {
+    policies.push("302_redirect");
+  }
+
+  // 去重
   return Array.from(new Set(policies));
 }
 import { encryptValue, buildSecretView } from "../utils/crypto.js";
@@ -184,7 +170,6 @@ export async function createStorageConfig(db, configData, adminId, encryptionSec
       password: encryptedPassword,
       default_folder: defaultFolder,
       tls_insecure_skip_verify: configData.tls_insecure_skip_verify ? 1 : 0,
-      custom_host: configData.custom_host || null,
       total_storage_bytes: totalStorageBytes,
     };
   } else {
@@ -198,6 +183,8 @@ export async function createStorageConfig(db, configData, adminId, encryptionSec
     admin_id: adminId,
     is_public: configData.is_public ? 1 : 0,
     is_default: configData.is_default ? 1 : 0,
+     remark: configData.remark ?? null,
+     url_proxy: configData.url_proxy || null,
     status: "ENABLED",
     config_json: JSON.stringify(configJson),
   };
@@ -221,6 +208,8 @@ export async function updateStorageConfig(db, id, updateData, adminId, encryptio
   if (updateData.is_public !== undefined) topPatch.is_public = updateData.is_public ? 1 : 0;
   if (updateData.is_default !== undefined) topPatch.is_default = updateData.is_default ? 1 : 0;
   if (updateData.status) topPatch.status = updateData.status;
+  if (updateData.remark !== undefined) topPatch.remark = updateData.remark;
+  if (updateData.url_proxy !== undefined) topPatch.url_proxy = updateData.url_proxy || null;
 
   let cfg = {};
   if (exists?.__config_json__ && typeof exists.__config_json__ === "object") {
@@ -229,7 +218,7 @@ export async function updateStorageConfig(db, id, updateData, adminId, encryptio
   // 合并驱动 JSON 字段
   const boolKeys = new Set(["path_style", "tls_insecure_skip_verify"]);
   for (const [k, v] of Object.entries(updateData)) {
-    if (["name", "storage_type", "is_public", "is_default", "status"].includes(k)) continue;
+    if (["name", "storage_type", "is_public", "is_default", "status", "remark", "url_proxy"].includes(k)) continue;
     if (k === "access_key_id") {
       cfg.access_key_id = await encryptValue(v, encryptionSecret);
     } else if (k === "secret_access_key") {
@@ -270,7 +259,11 @@ export async function updateStorageConfig(db, id, updateData, adminId, encryptio
   if (topPatch.is_default === 1) {
     await repo.setAsDefault(id, adminId);
   }
-  return;
+
+  try {
+    const mountManager = new MountManager(db, encryptionSecret, factory);
+    await mountManager.clearConfigCache(exists.storage_type, id);
+  } catch {}
 }
 
 export async function deleteStorageConfig(db, id, adminId, repositoryFactory = null) {

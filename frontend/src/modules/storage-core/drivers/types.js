@@ -21,6 +21,9 @@ export const DRIVER_TYPES = Object.freeze({
   S3: "S3",
   WEBDAV: "WEBDAV",
   LOCAL: "LOCAL",
+  ONEDRIVE: "ONEDRIVE",
+  GOOGLE_DRIVE: "GOOGLE_DRIVE",
+  GITHUB_API: "GITHUB_API",
 });
 
 export const DEFAULT_DRIVER_CAPABILITIES = Object.freeze({
