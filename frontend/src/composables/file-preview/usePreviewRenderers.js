@@ -4,6 +4,7 @@
  */
 
 import { ref, computed, watch, onMounted, onUnmounted } from "vue";
+import { useEventListener } from "@vueuse/core";
 import { formatDateTime } from "@/utils/timeUtils.js";
 import { formatFileSize as formatFileSizeUtil, FileType, getExtension, isArchiveFile } from "@/utils/fileTypes.js";
 import { decodeImagePreviewUrlToPngObjectUrl, revokeObjectUrl, shouldAttemptDecodeImagePreview } from "@/utils/imageDecode.js";
@@ -209,12 +210,28 @@ export function usePreviewRenderers(file, emit, darkMode) {
     }
   };
   
+  //自动清理
+  useEventListener(document, "fullscreenchange", handleFullscreenChange);
+  useEventListener(document, "keydown", handleKeyDown);
+
   // ===== 事件处理 =====
+
+  let lastContentLoadedKey = "";
+
+  const buildContentLoadedKey = () => {
+    const f = file.value;
+    const fp = f?.path || f?.id || f?.name || "";
+    const url = authenticatedPreviewUrl.value || previewUrl.value || "";
+    return `${fp}::${url}`;
+  };
 
   /**
    * 处理内容加载完成
    */
   const handleContentLoaded = () => {
+    const key = buildContentLoadedKey();
+    if (key && key === lastContentLoadedKey) return;
+    lastContentLoadedKey = key;
     console.log("内容加载完成");
     emit("loaded");
   };
@@ -332,6 +349,8 @@ export function usePreviewRenderers(file, emit, darkMode) {
   watch(
     () => file.value,
     async (newFile) => {
+      // 文件变更：允许下一次 loaded 重新触发
+      lastContentLoadedKey = "";
       // 重置基本状态
       loadError.value = false;
       revokeObjectUrl(authenticatedPreviewUrl.value);
@@ -457,10 +476,6 @@ export function usePreviewRenderers(file, emit, darkMode) {
    * 组件挂载时的初始化
    */
   onMounted(() => {
-    // 添加事件监听器
-    document.addEventListener("fullscreenchange", handleFullscreenChange);
-    document.addEventListener("keydown", handleKeyDown);
-
     console.log("文件预览组件已挂载");
   });
 
@@ -475,10 +490,6 @@ export function usePreviewRenderers(file, emit, darkMode) {
       imageDecodeAbortController.value.abort();
       imageDecodeAbortController.value = null;
     }
-
-    // 移除事件监听器
-    document.removeEventListener("fullscreenchange", handleFullscreenChange);
-    document.removeEventListener("keydown", handleKeyDown);
 
     // 清除计时器
     if (previewTimeoutId.value) {

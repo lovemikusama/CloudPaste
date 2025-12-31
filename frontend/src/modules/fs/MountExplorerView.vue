@@ -87,6 +87,7 @@
 
       <!-- 上传弹窗 -->
       <UppyUploadModal
+        v-if="hasEverOpenedUploadModal"
         :is-open="isUploadModalOpen"
         :current-path="currentPath"
         :dark-mode="darkMode"
@@ -98,6 +99,7 @@
 
       <!-- 复制弹窗 -->
       <CopyModal
+        v-if="hasEverOpenedCopyModal"
         :is-open="isCopyModalOpen"
         :dark-mode="darkMode"
         :selected-items="copyModalItems"
@@ -109,7 +111,13 @@
       />
 
       <!-- 任务列表弹窗 -->
-      <TaskListModal :is-open="isTasksModalOpen" :dark-mode="darkMode" @close="handleCloseTasksModal" @task-completed="handleTaskCompleted" />
+      <TaskListModal
+        v-if="hasEverOpenedTasksModal"
+        :is-open="isTasksModalOpen"
+        :dark-mode="darkMode"
+        @close="handleCloseTasksModal"
+        @task-completed="handleTaskCompleted"
+      />
 
       <!-- 新建文件夹弹窗 -->
       <InputDialog
@@ -204,7 +212,7 @@
 
       <!-- 内容区域 - 根据模式显示文件列表或文件预览 -->
       <div class="mount-content bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 transition-colors duration-200">
-        <Transition name="fade-slide" mode="out-in">
+        <Transition name="fade-slide" mode="out-in" @before-enter="handleContentBeforeEnter">
           <!-- 文件列表模式 -->
           <div v-if="!showFilePreview" key="list">
             <!-- 内嵌式密码验证 -->
@@ -250,13 +258,15 @@
                 </div>
               </div>
 
-              <!-- 目录列表 - 保持挂载状态 -->
+              <!-- 目录列表 -->
               <div class="min-h-[400px]">
                 <DirectoryList
                   ref="directoryListRef"
                   :current-path="currentPath"
                   :items="visibleItems"
                   :loading="loading"
+                  :has-more="directoryHasMore"
+                  :loading-more="directoryLoadingMore"
                   :is-virtual="isVirtualDirectory"
                   :dark-mode="darkMode"
                   :view-mode="viewMode"
@@ -273,6 +283,7 @@
                   @rename="handleRename"
                   @delete="handleDelete"
                   @preview="handlePreview"
+                  @load-more="handleLoadMore"
                   @item-select="handleItemSelect"
                   @toggle-select-all="toggleSelectAll"
                   @show-message="handleShowMessage"
@@ -346,6 +357,7 @@
 
     <!-- 搜索弹窗 -->
     <SearchModal
+      v-if="hasEverOpenedSearchModal"
       :is-open="isSearchModalOpen"
       :dark-mode="darkMode"
       :current-path="currentPath"
@@ -356,13 +368,14 @@
 
     <!-- 设置抽屉 -->
     <SettingsDrawer
+      v-if="hasEverOpenedSettingsDrawer"
       :is-open="isSettingsDrawerOpen"
       :dark-mode="darkMode"
       @close="handleCloseSettingsDrawer"
     />
 
     <!-- FS 媒体查看器（Lightbox Shell） -->
-    <FsMediaLightboxDialog />
+    <FsMediaLightboxDialog v-if="hasEverOpenedLightbox" />
 
     <!-- 悬浮操作栏 (当有选中项时显示) -->
     <FloatingActionBar
@@ -399,15 +412,20 @@
 </template>
 
 <script setup>
-import { ref, computed, provide, onMounted, onBeforeUnmount, watch } from "vue";
+import { ref, computed, provide, onMounted, onBeforeUnmount, watch, defineAsyncComponent } from "vue";
 import { useI18n } from "vue-i18n";
 import { storeToRefs } from "pinia";
+import { useEventListener, useWindowScroll } from "@vueuse/core";
 import { useThemeMode } from "@/composables/core/useThemeMode.js";
 import { IconBack, IconExclamation, IconSearch, IconSettings, IconXCircle } from "@/components/icons";
 import LoadingIndicator from "@/components/common/LoadingIndicator.vue";
 
 // 组合式函数 - 使用统一聚合导出
-import { useSelection, useFileOperations, useUIState, useFileBasket } from "@/composables/index.js";
+// 按需从具体文件导入
+import { useSelection } from "@/composables/ui-interaction/useSelection.js";
+import { useUIState } from "@/composables/ui-interaction/useUIState.js";
+import { useFileBasket } from "@/composables/file-system/useFileBasket.js";
+import { useFileOperations } from "@/composables/file-system/useFileOperations.js";
 import { usePathPassword } from "@/composables/usePathPassword.js";
 import { useContextMenu } from "@/composables/useContextMenu.js";
 
@@ -419,22 +437,24 @@ import BreadcrumbNav from "@/modules/fs/components/shared/BreadcrumbNav.vue";
 import DirectoryList from "@/modules/fs/components/directory/DirectoryList.vue";
 import DirectoryReadme from "@/modules/fs/components/DirectoryReadme.vue";
 import FileOperations from "@/modules/fs/components/shared/FileOperations.vue";
-import FilePreview from "@/modules/fs/components/preview/FilePreview.vue";
-import UppyUploadModal from "@/modules/fs/components/shared/modals/UppyUploadModal.vue";
-import CopyModal from "@/modules/fs/components/shared/modals/CopyModal.vue";
-import TaskListModal from "@/modules/fs/components/shared/modals/TaskListModal.vue";
-import SearchModal from "@/modules/fs/components/shared/modals/SearchModal.vue";
+// （Uppy、Office、EPUB、视频播放器等）按需加载
+const FilePreview = defineAsyncComponent(() => import("@/modules/fs/components/preview/FilePreview.vue"));
+const UppyUploadModal = defineAsyncComponent(() => import("@/modules/fs/components/shared/modals/UppyUploadModal.vue"));
+const CopyModal = defineAsyncComponent(() => import("@/modules/fs/components/shared/modals/CopyModal.vue"));
+const TaskListModal = defineAsyncComponent(() => import("@/modules/fs/components/shared/modals/TaskListModal.vue"));
+const SearchModal = defineAsyncComponent(() => import("@/modules/fs/components/shared/modals/SearchModal.vue"));
 import PathPasswordDialog from "@/modules/fs/components/shared/modals/PathPasswordDialog.vue";
 import ConfirmDialog from "@/components/common/dialogs/ConfirmDialog.vue";
 import InputDialog from "@/components/common/dialogs/InputDialog.vue";
-import FsMediaLightboxDialog from "@/modules/fs/components/lightbox/FsMediaLightboxDialog.vue";
+const FsMediaLightboxDialog = defineAsyncComponent(() => import("@/modules/fs/components/lightbox/FsMediaLightboxDialog.vue"));
 import PermissionManager from "@/components/common/PermissionManager.vue";
-import SettingsDrawer from "@/modules/fs/components/shared/SettingsDrawer.vue";
+const SettingsDrawer = defineAsyncComponent(() => import("@/modules/fs/components/shared/SettingsDrawer.vue"));
 import FloatingActionBar from "@/modules/fs/components/shared/FloatingActionBar.vue";
 import FloatingToolbar from "@/modules/fs/components/shared/FloatingToolbar.vue";
 import BackToTop from "@/modules/fs/components/shared/BackToTop.vue";
 import { useExplorerSettings } from "@/composables/useExplorerSettings";
 import { createFsItemNameDialogValidator, isSameOrSubPath, validateFsItemName } from "@/utils/fsPathUtils.js";
+import { useFsMediaLightbox } from "@/modules/fs/composables/useFsMediaLightbox";
 
 const { t } = useI18n();
 
@@ -450,6 +470,9 @@ const pathPassword = usePathPassword();
 // 右键菜单 - 延迟初始化
 let contextMenu = null;
 
+// Lightbox（模块内单例）
+const fsLightbox = useFsMediaLightbox();
+
 // 文件篮状态
 const { isBasketOpen } = storeToRefs(fileBasket);
 
@@ -463,6 +486,8 @@ const {
   directoryItems,
   isVirtualDirectory,
   directoryMeta,
+  directoryHasMore,
+  directoryLoadingMore,
   isAdmin,
   hasApiKey,
   hasFilePermission,
@@ -483,9 +508,53 @@ const {
   refreshDirectory,
   refreshCurrentRoute,
   prefetchDirectory,
+  consumePendingScrollRestore,
   invalidateCaches,
   removeItemsFromCurrentDirectory,
+  loadMoreCurrentDirectory,
 } = useMountExplorerController();
+
+const { y: windowScrollY } = useWindowScroll();
+
+// ===== 仅“第一次打开”时才加载重弹窗组件 =====
+const hasEverOpenedUploadModal = ref(false);
+const hasEverOpenedCopyModal = ref(false);
+const hasEverOpenedTasksModal = ref(false);
+const hasEverOpenedSearchModal = ref(false);
+const hasEverOpenedSettingsDrawer = ref(false);
+const hasEverOpenedLightbox = ref(false);
+
+const scheduleWindowScrollTo = (top) => {
+  if (typeof window === "undefined") return;
+  // 等列表 DOM 插入并完成一次布局后再滚动
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(() => {
+      windowScrollY.value = top;
+    });
+    return;
+  }
+  // 降级：极端环境无 rAF
+  setTimeout(() => {
+    windowScrollY.value = top;
+  }, 0);
+};
+
+// 解决你说的“先下→到顶→再下”抖动：把滚动设置统一收口到 Transition 的进入阶段，只执行一次
+const handleContentBeforeEnter = () => {
+  // 进入预览：默认回到顶部
+  if (showFilePreview.value) {
+    scheduleWindowScrollTo(0);
+    return;
+  }
+
+  // 回到列表：如果 controller 有“待恢复的滚动值”，在列表真正进入前先设置好
+  if (typeof consumePendingScrollRestore === "function") {
+    const value = consumePendingScrollRestore();
+    if (typeof value === "number") {
+      scheduleWindowScrollTo(value);
+    }
+  }
+};
 
 // 根据目录 Meta 的隐藏规则计算实际可见条目
 const visibleItems = computed(() => {
@@ -558,6 +627,44 @@ const isCreatingFolder = ref(false);
 
 // 设置抽屉状态
 const isSettingsDrawerOpen = ref(false);
+
+// ===== 仅“第一次打开”时才加载重弹窗组件（watch 需要在依赖变量定义之后注册） =====
+watch(
+  () => isUploadModalOpen.value,
+  (open) => {
+    if (open) hasEverOpenedUploadModal.value = true;
+  }
+);
+watch(
+  () => isCopyModalOpen.value,
+  (open) => {
+    if (open) hasEverOpenedCopyModal.value = true;
+  }
+);
+watch(
+  () => isTasksModalOpen.value,
+  (open) => {
+    if (open) hasEverOpenedTasksModal.value = true;
+  }
+);
+watch(
+  () => isSearchModalOpen.value,
+  (open) => {
+    if (open) hasEverOpenedSearchModal.value = true;
+  }
+);
+watch(
+  () => isSettingsDrawerOpen.value,
+  (open) => {
+    if (open) hasEverOpenedSettingsDrawer.value = true;
+  }
+);
+watch(
+  () => fsLightbox.isOpen.value,
+  (open) => {
+    if (open) hasEverOpenedLightbox.value = true;
+  }
+);
 
 // 初始化用户配置
 const explorerSettings = useExplorerSettings();
@@ -749,6 +856,13 @@ const handleRefresh = async () => {
 };
 
 /**
+ * 处理“加载更多”（用于上游分页的目录）
+ */
+const handleLoadMore = async () => {
+  await loadMoreCurrentDirectory();
+};
+
+/**
  * 处理视图模式变化
  */
 const handleViewModeChange = (newViewMode) => {
@@ -898,9 +1012,6 @@ const handlePreview = async (item) => {
 
   // 直接导航到文件路径（pathname 表示对象）
   await navigateToFile(item.path);
-
-  // 滚动到顶部
-  window.scrollTo({ top: 0 });
 };
 
 /**
@@ -1062,8 +1173,18 @@ const handleCloseUploadModal = () => {
   closeUploadModal();
 };
 
-const handleUploadSuccess = async () => {
-  showMessage("success", t("mount.messages.uploadSuccess"));
+const handleUploadSuccess = async (payload) => {
+  const count = Number(payload?.count || 0);
+  const skippedUploadCount = Number(payload?.skippedUploadCount || 0);
+
+  if (skippedUploadCount > 0) {
+    showMessage("success", t("mount.messages.uploadSuccessWithSkipped", { count, skipped: skippedUploadCount }));
+  } else if (count > 1) {
+    // 兼容：多文件时给更明确的提示
+    showMessage("success", t("mount.messages.uploadSuccessWithCount", { count }));
+  } else {
+    showMessage("success", t("mount.messages.uploadSuccess"));
+  }
   invalidateCaches();
   await refreshDirectory();
 };
@@ -1140,6 +1261,7 @@ const handleShowMessage = (messageInfo) => {
 
 // 用于存储清除高亮的函数引用，以便在下次右键时先移除旧监听器
 let clearHighlightHandler = null;
+let stopClearHighlightListener = null;
 
 // 处理右键菜单事件
 // 1. 单文件右键：只临时高亮显示当前文件
@@ -1182,10 +1304,11 @@ const handleFileContextMenu = (payload) => {
   if (!item) return;
 
   // 先移除之前的监听器（如果存在）
-  if (clearHighlightHandler) {
-    document.removeEventListener("click", clearHighlightHandler);
-    clearHighlightHandler = null;
+  if (typeof stopClearHighlightListener === "function") {
+    stopClearHighlightListener();
+    stopClearHighlightListener = null;
   }
+  clearHighlightHandler = null;
 
   // 获取当前已选中的项目
   const selectedFiles = getSelectedItems();
@@ -1220,13 +1343,17 @@ const handleFileContextMenu = (payload) => {
   // 不监听 contextmenu 事件，因为下次右键会直接设置新的高亮
   clearHighlightHandler = () => {
     contextHighlightPath.value = null;
+    if (typeof stopClearHighlightListener === "function") {
+      stopClearHighlightListener();
+      stopClearHighlightListener = null;
+    }
   };
 
   // 延迟添加监听器，避免当前事件立即触发
   // 使用 ref 存储 timeout ID 以便在组件卸载时清理
   const timeoutId = setTimeout(() => {
     if (clearHighlightHandler) {
-      document.addEventListener("click", clearHighlightHandler, { once: true });
+      stopClearHighlightListener = useEventListener(document, "click", clearHighlightHandler, { once: true });
     }
   }, 50);
 };
@@ -1287,7 +1414,13 @@ const handlePasswordError = ({ message }) => {
 };
 
 // 预览相关方法
+let lastPreviewLoadedKey = "";
 const handlePreviewLoaded = () => {
+  // 避免同一个文件在媒体事件重复触发时刷屏
+  const f = previewInfo.value || previewFile.value;
+  const key = f?.path || f?.name || "";
+  if (key && key === lastPreviewLoadedKey) return;
+  lastPreviewLoadedKey = key;
   console.log("预览加载完成");
 };
 
@@ -1341,6 +1474,10 @@ const handleGlobalKeydown = (event) => {
   }
 };
 
+// 注册全局事件（自动清理）
+useEventListener(window, "auth-state-changed", handleAuthStateChange);
+useEventListener(document, "keydown", handleGlobalKeydown);
+
 // 监听目录项目变化，更新选择状态（仅针对可见条目）
 watch(
   () => visibleItems.value,
@@ -1364,14 +1501,6 @@ watch(
 
 // 组件挂载时执行
 onMounted(async () => {
-  // 监听认证状态变化事件
-  window.addEventListener("auth-state-changed", handleAuthStateChange);
-
-  // 监听全局快捷键
-  document.addEventListener("keydown", handleGlobalKeydown);
-
-
-
   console.log("MountExplorer权限状态:", {
     isAdmin: isAdmin.value,
     hasApiKey: hasApiKey.value,
@@ -1386,15 +1515,12 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   console.log("MountExplorerView组件卸载，清理资源");
 
-  // 移除事件监听器
-  window.removeEventListener("auth-state-changed", handleAuthStateChange);
-  document.removeEventListener("keydown", handleGlobalKeydown);
-
   // 清理 clearHighlightHandler 事件监听器
-  if (clearHighlightHandler) {
-    document.removeEventListener("click", clearHighlightHandler);
-    clearHighlightHandler = null;
+  if (typeof stopClearHighlightListener === "function") {
+    stopClearHighlightListener();
+    stopClearHighlightListener = null;
   }
+  clearHighlightHandler = null;
 
   // 清理 MutationObserver
   explorerSettings.cleanupDarkModeObserver();

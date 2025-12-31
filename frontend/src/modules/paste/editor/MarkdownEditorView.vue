@@ -17,9 +17,6 @@
       </div>
     </div>
 
-    <!-- 公告弹窗 --->
-    <AnnouncementModal :content="siteSettings.site_announcement_content" :enabled="siteSettings.site_announcement_enabled" :dark-mode="darkMode" />
-
     <!-- 权限管理组件 -->
     <PermissionManager
       :dark-mode="darkMode"
@@ -98,6 +95,7 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted, nextTick } from "vue";
+import { useDebounceFn, useEventListener, useLocalStorage, useTimeoutFn } from "@vueuse/core";
 import { useI18n } from "vue-i18n";
 import { useAuthStore } from "@/stores/authStore";
 import { usePasteService } from "@/modules/paste";
@@ -110,7 +108,6 @@ import EditorForm from "@/modules/paste/editor/components/EditorForm.vue";
 import ShareLinkBox from "@/components/common/ShareLinkBox.vue";
 import QRCodeModal from "@/modules/paste/editor/components/QRCodeModal.vue";
 import CopyFormatMenu from "@/modules/paste/editor/components/CopyFormatMenu.vue";
-import AnnouncementModal from "@/modules/admin/components/AnnouncementModal.vue";
 
 const { t } = useI18n();
 
@@ -138,6 +135,17 @@ const savingStatus = ref("");
 const isSubmitting = ref(false);
 const shareLink = ref("");
 const currentSharePassword = ref("");
+const draftContent = useLocalStorage("cloudpaste-content", "");
+
+// savingStatus 自动清理
+const clearSavingStatusDelayMs = ref(0);
+const { start: startClearSavingStatus, stop: stopClearSavingStatus } = useTimeoutFn(
+  () => {
+    savingStatus.value = "";
+  },
+  clearSavingStatusDelayMs,
+  { immediate: false }
+);
 
 const rawShareLink = computed(() => {
   if (!shareLink.value) return "";
@@ -159,12 +167,6 @@ const showQRCodeModal = ref(false);
 // 复制格式菜单状态
 const copyFormatMenuVisible = ref(false);
 const copyFormatMenuPosition = ref({ x: 0, y: 0 });
-
-// 站点设置状态
-const siteSettings = ref({
-  site_announcement_enabled: false,
-  site_announcement_content: "",
-});
 
 // 权限变化处理 - 当权限状态改变时执行相应的业务逻辑
 const handlePermissionChange = (hasPermissionValue) => {
@@ -209,9 +211,9 @@ const handleStatusMessage = (payload) => {
     showInfo(message);
   }
 
-  setTimeout(() => {
-    savingStatus.value = "";
-  }, type === "error" ? 4000 : 3000);
+  stopClearSavingStatus();
+  clearSavingStatusDelayMs.value = type === "error" ? 4000 : 3000;
+  startClearSavingStatus();
 };
 
 const handleCountdownEnd = () => {
@@ -313,14 +315,8 @@ const closeCopyFormatMenu = () => {
   copyFormatMenuVisible.value = false;
 };
 
-// 窗口尺寸变化时，保持菜单跟随工具栏按钮
-onMounted(() => {
-  window.addEventListener("resize", updateCopyFormatMenuPosition);
-});
-
-onUnmounted(() => {
-  window.removeEventListener("resize", updateCopyFormatMenuPosition);
-});
+// 窗口尺寸变化时，保持菜单跟随工具栏按钮（自动清理）
+useEventListener(window, "resize", updateCopyFormatMenuPosition);
 
 // 显示二维码
 const showQRCode = () => {
@@ -427,57 +423,30 @@ const saveContent = async (formData) => {
 };
 
 // 自动保存
-let autoSaveTimer = null;
-const autoSaveDebounce = () => {
-  if (autoSaveTimer) {
-    clearTimeout(autoSaveTimer);
+const autoSaveDebounce = useDebounceFn(() => {
+  try {
+    draftContent.value = editorContent.value;
+  } catch (e) {
+    console.warn(t("markdown.messages.autoSaveFailed"), e);
   }
-
-  autoSaveTimer = setTimeout(() => {
-    try {
-      localStorage.setItem("cloudpaste-content", editorContent.value);
-      // 自动保存成功，无需日志
-    } catch (e) {
-      console.warn(t("markdown.messages.autoSaveFailed"), e);
-    }
-  }, 1000);
-};
+}, 1000);
 
 // 组件挂载
 onMounted(async () => {
   // 恢复保存的内容
   try {
-    const savedContent = localStorage.getItem("cloudpaste-content");
-    if (savedContent) {
-      editorContent.value = savedContent;
+    if (draftContent.value) {
+      editorContent.value = draftContent.value;
     }
   } catch (e) {
     console.warn(t("markdown.messages.restoreContentFailed"), e);
-  }
-
-  // 获取站点设置
-  try {
-    const settings = await pasteService.getMarkdownSettings();
-    settings.forEach((setting) => {
-      if (setting.key === "site_announcement_enabled") {
-        siteSettings.value.site_announcement_enabled = setting.value === "true";
-      } else if (setting.key === "site_announcement_content") {
-        siteSettings.value.site_announcement_content = setting.value || "";
-      }
-    });
-  } catch (error) {
-    console.error("获取站点设置失败:", error);
-    // 获取站点设置失败不影响页面正常使用
   }
 });
 
 // 组件卸载
 onUnmounted(() => {
-  // 清理定时器
-  if (autoSaveTimer) {
-    clearTimeout(autoSaveTimer);
-    autoSaveTimer = null;
-  }
+  stopClearSavingStatus();
+  autoSaveDebounce.cancel?.();
 });
 </script>
 
